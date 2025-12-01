@@ -1,6 +1,7 @@
 # Core dependencies
 mcp>=1.0.0
 requests>=2.31.0
+PyYAML>=6.0.1
 
 # Image processing
 Pillow>=10.0.0
