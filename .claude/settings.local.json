@@ -11,7 +11,21 @@
       "mcp__MCP_DOCKER__obsidian_append_content",
       "Bash(docker-compose build:*)",
       "Bash(git init:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git branch:*)",
+      "mcp__MCP_DOCKER__create_repository",
+      "Bash(git commit -m \"$(cat <<''EOF''\nInitial commit: Odoo 19 MCP Server with advanced features\n\nMajor features:\n- Multi-company support with INI-style configuration\n- Full CRUD operations (search_read, create, write, unlink, search, read, search_count)\n- Image processing support with Pillow\n- Automatic retry logic with exponential backoff\n- Configurable request timeouts\n- HTTP connection pooling for better performance\n- Multi-stage Docker build (~40% smaller image)\n- Security: non-root user in Docker\n- Health checks and comprehensive logging\n- Complete test suite with pytest\n- CI/CD with GitHub Actions\n- Example scripts and extensive documentation\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git remote add:*)",
+      "Bash(git push:*)",
+      "Bash(git config:*)",
+      "Bash(git commit:*)",
+      "mcp__MCP_DOCKER__push_files",
+      "Bash(git log:*)",
+      "mcp__MCP_DOCKER__get_me",
+      "Bash(git rm:*)",
+      "mcp__MCP_DOCKER__create_or_update_file",
+      "Bash(git pull:*)",
+      "Bash(git checkout:*)"
     ],
     "deny": [],
     "ask": []
