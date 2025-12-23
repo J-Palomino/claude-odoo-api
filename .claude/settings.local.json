@@ -25,7 +25,10 @@
       "Bash(git rm:*)",
       "mcp__MCP_DOCKER__create_or_update_file",
       "Bash(git pull:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(docker run:*)",
+      "Bash(docker images:*)",
+      "Bash(docker build:*)"
     ],
     "deny": [],
     "ask": []

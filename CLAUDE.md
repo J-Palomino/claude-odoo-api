@@ -159,6 +159,17 @@ Tool(
 )
 ```
 
+## MCP Catalog Generation
+
+To distribute the server via MCP catalogs (e.g., for the Docker Desktop MCP Toolkit), the `bmya-mcp-catalog.yaml` source file must be converted to `catalog.json`.
+
+This process requires the `PyYAML` dependency, which has been added to `requirements.txt`.
+
+The command to perform the conversion is:
+```bash
+python -c "import sys, yaml, json; json.dump(yaml.safe_load(open('bmya-mcp-catalog.yaml')), sys.stdout, indent=2)" > catalog.json
+```
+
 ## Odoo Domain Filter Syntax
 
 Domains are search criteria expressed as lists:
@@ -186,3 +197,63 @@ Reference these common models when building queries:
 - All API calls run in their own SQL transaction (auto-commit on success, rollback on error)
 - When running in Docker with local Odoo, use `host.docker.internal` instead of `localhost` or `--network host`
 - The MCP server runs in stdio mode - it reads from stdin and writes to stdout following MCP protocol
+
+## Docker MCP Registry Submission
+
+### Status
+**PR #814 submitted to docker/mcp-registry on 2025-12-02**
+- PR URL: https://github.com/docker/mcp-registry/pull/814
+- Status: Pending review by Docker team
+
+### Submission Process Completed
+
+1. **Verified Dockerfile**: Confirmed existence of Dockerfile in repository (bmya/claude-odoo-api)
+
+2. **Forked docker/mcp-registry**: Created fork at Danisan/mcp-registry
+
+3. **Created Server Entry**: Added `servers/odoo-api/server.yaml` with:
+   - Server name: `odoo-api`
+   - Docker image: `bmya/odoo-mcp-server`
+   - Category: business
+   - Tags: odoo, erp, business, crm, secrets
+   - Icon: https://www.google.com/s2/favicons?domain=odoo.com&sz=64
+   - Source project: https://github.com/bmya/claude-odoo-api
+   - Source commit: 5f93afd973bcda0386140c465e5fac8728f156b6
+
+4. **Created tools.json**: Added comprehensive tool definitions to avoid build failures:
+   - 8 tools documented: list_companies, search_read, create, write, unlink, search, read, search_count
+   - Full argument specifications for each tool
+   - Required because server needs configuration before it can list tools
+
+5. **Submitted Pull Request**: PR #814 to docker/mcp-registry
+   - Includes full feature description
+   - Documents multi-company support
+   - Notes MIT license compliance
+   - Provides comprehensive tool list
+
+### Configuration in Registry
+
+The server entry requires three secrets for configuration:
+```yaml
+config:
+  secrets:
+    - name: odoo.url
+      env: ODOO_URL
+      example: http://localhost:8069
+    - name: odoo.database
+      env: ODOO_DATABASE
+      example: your_database
+    - name: odoo.api_key
+      env: ODOO_API_KEY
+      example: your_api_key_here
+```
+
+### Next Steps
+1. Monitor PR #814 for CI validation results
+2. Respond to any feedback from Docker team review
+3. Provide test credentials if requested via https://forms.gle/6Lw3nsvu2d6nFg8e6
+4. Once merged, server will be available in official Docker MCP Registry
+
+### Files in Registry Submission
+- `servers/odoo-api/server.yaml` - Server configuration and metadata
+- `servers/odoo-api/tools.json` - Tool definitions for build process
