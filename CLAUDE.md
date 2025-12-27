@@ -6,6 +6,102 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is an MCP (Model Context Protocol) server that provides tools to interact with Odoo 19's External JSON-2 API. The server supports multiple company/instance configurations and exposes 8 tools for CRUD operations on Odoo databases: list_companies, search_read, create, write, unlink, search, read, and search_count.
 
+## 🔧 CRITICAL FIX HISTORY - 2025-12-23
+
+### Problem Discovered
+El MCP server tenía un bug crítico de permisos en el Dockerfile desde el commit inicial (33c7f16):
+
+**Síntoma:**
+```
+ModuleNotFoundError: No module named 'requests'
+```
+
+**Causa raíz:**
+- Las dependencias Python se instalaban con `pip install --user` en el builder stage → `/root/.local`
+- Se copiaban a `/root/.local` en el stage final
+- Se creaba usuario `odoo` y se cambiaba con `USER odoo`
+- El PATH apuntaba a `/root/.local/bin` pero el proceso corría como usuario `odoo`
+- Usuario `odoo` NO tiene permisos para leer `/root/.local`
+
+**Líneas problemáticas en Dockerfile (original):**
+```dockerfile
+COPY --from=builder /root/.local /root/.local  # ❌ Copiado a /root
+COPY src/ ./src/
+RUN useradd -m -u 1000 odoo && chown -R odoo:odoo /app
+USER odoo                                        # ❌ Usuario sin acceso a /root
+ENV PATH=/root/.local/bin:$PATH                 # ❌ PATH inaccesible
+```
+
+### Solution Implemented (commit 26c7ba6)
+
+**Cambios en Dockerfile:**
+1. Crear usuario `odoo` **ANTES** de copiar archivos
+2. Copiar dependencias a `/home/odoo/.local` con ownership correcto
+3. Actualizar PATH para apuntar al directorio del usuario odoo
+
+**Código corregido:**
+```dockerfile
+# Create non-root user for security
+RUN useradd -m -u 1000 odoo && chown -R odoo:odoo /app
+
+# Copy Python dependencies from builder to odoo user home
+COPY --from=builder --chown=odoo:odoo /root/.local /home/odoo/.local
+
+# Copy the MCP server source
+COPY --chown=odoo:odoo src/ ./src/
+
+# Switch to non-root user
+USER odoo
+
+# Set environment variables (can be overridden at runtime)
+ENV PATH=/home/odoo/.local/bin:$PATH
+```
+
+### Verification Test Results
+
+**Test 1 - Módulos Python accesibles:**
+```bash
+docker run --rm bmya/odoo-mcp-server:latest python -c "import requests; import mcp; print('✅ Módulos cargados correctamente')"
+# Resultado: ✅ Módulos cargados correctamente
+```
+
+**Test 2 - Carga de configuración multi-company:**
+```bash
+docker run --rm -v /Users/danielb/claude-odoo-api/.env:/app/.env:ro bmya/odoo-mcp-server:latest python -c "..."
+# Resultado: ✅ Loaded 2 companies: ['bmya', 'companycl']
+```
+
+### Docker Image Status
+
+**Imagen actual:**
+- Repository: `bmya/odoo-mcp-server:latest`
+- Image ID: `b18c9297c061` (nuevo, reconstruido 2025-12-23 22:45)
+- Size: 323MB
+- Status: ✅ Funcionando correctamente
+
+**Estado en Docker MCP Toolkit:**
+```bash
+docker mcp server list
+# MCP Servers (2 enabled)
+# - odoo-api         (✓ habilitado)
+# - perplexity-ask   (✓ habilitado)
+```
+
+### Git Status
+
+**Commit realizado:**
+- Hash: `26c7ba6`
+- Mensaje: `[FIX] Dockerfile: Corregir permisos de usuario odoo`
+- Branch: `main`
+- Estado: ✅ Commiteado localmente
+- Pendiente: `git push origin main` (no ejecutado aún)
+
+**Archivos modificados pero no commiteados:**
+- `.claude/settings.local.json` (cambios de sesión)
+- `CLAUDE.md` (este archivo - documentación actualizada)
+- `add_mcp_server.md` (untracked)
+- `.gemini-clipboard/` (untracked)
+
 ## Architecture
 
 ### Core Components
@@ -257,3 +353,74 @@ config:
 ### Files in Registry Submission
 - `servers/odoo-api/server.yaml` - Server configuration and metadata
 - `servers/odoo-api/tools.json` - Tool definitions for build process
+
+---
+
+## MCP Server Management
+
+### Docker MCP Toolkit (Official)
+
+El servidor `odoo-api` se gestiona a través del **Docker MCP Toolkit** que viene integrado en Docker Desktop.
+
+**Comandos principales:**
+```bash
+# Listar servidores habilitados
+docker mcp server list
+
+# Habilitar/deshabilitar servidor
+docker mcp server enable odoo-api
+docker mcp server disable odoo-api
+
+# Ver catálogos disponibles
+docker mcp catalog ls
+
+# Ver servidores en catálogo
+docker mcp catalog show bmya-mcp-catalog
+```
+
+**Catálogo Custom: bmya-mcp-catalog**
+- Definido en: `bmya-mcp-catalog.yaml` y `catalog.json`
+- Importado en Docker MCP Toolkit
+- Contiene el servidor `odoo-api` con configuración Docker
+
+**Estado actual del servidor:**
+- ✅ Servidor `odoo-api` registrado en catálogo `bmya-mcp-catalog`
+- ✅ Imagen Docker: `bmya/odoo-mcp-server:latest`
+- ✅ Montaje de volumen: `.env` file para configuración multi-company
+- ✅ Habilitado en Docker MCP Toolkit
+
+### MCP Manager (~/mcp-manager)
+
+**Propósito:**
+- Wrapper UI interactivo sobre comandos `docker mcp`
+- Permite gestionar servidores MCP por proyecto usando archivos `.mcp-config.json`
+- Reduce consumo de tokens al deshabilitar servidores no necesarios por proyecto
+
+**NO es necesario para:**
+- Activar/desactivar servidores globalmente (se hace con `docker mcp server enable/disable`)
+- Conectar clientes (Claude/Cursor) al gateway (se hace con `docker mcp client connect`)
+
+**ES útil para:**
+- Gestión granular por proyecto de qué servidores están activos
+- UI amigable con checkboxes para selección múltiple
+- Visualización del estado actual de servidores
+
+**Ubicación:** `/Users/danielb/mcp-manager/`
+**Archivos principales:**
+- `mcp-manager.py` - Script principal con UI interactiva
+- `README-MCP-MANAGER.md` - Documentación completa
+- `install-mcp-manager.sh` - Instalador automático
+
+### Uso del Servidor en Proyectos
+
+**Proyecto lead-enrichment:**
+- Configuración: `~/lead-enrichment/.mcp-config.json`
+- Servidores habilitados: `MCP_DOCKER`, `mcp__odoo-api`, `mcp__perplexity-ask`
+- Estado: ✅ Servidor odoo-api disponible y funcional
+
+**Configuración Multi-Company:**
+El archivo `.env` en este repositorio define 2 compañías:
+1. **bmya** - Producción en https://www.bmya.cl
+2. **companycl** - Testing local en http://host.docker.internal:8069
+
+Cada proyecto que use el servidor puede especificar qué compañía usar al llamar las tools MCP.
