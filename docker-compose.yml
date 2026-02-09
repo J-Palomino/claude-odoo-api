@@ -2,14 +2,15 @@ services:
   odoo-api:
     build: .
     container_name: odoo-mcp-server
-    volumes:
-      # Mount .env file for multi-company configuration
-      - ./.env:/app/.env:ro
+    ports:
+      - "8080:8080"
     environment:
-      # Optional: Override config file location
-      - ODOO_CONFIG_FILE=${ODOO_CONFIG_FILE:-/app/.env}
-    stdin_open: true
-    tty: true
+      - MCP_TRANSPORT=sse
+      - MCP_API_KEY=${MCP_API_KEY:-}
+      - ODOO_URL=${ODOO_URL:-http://localhost:8069}
+      - ODOO_DATABASE=${ODOO_DATABASE:-odoo}
+      - ODOO_API_KEY=${ODOO_API_KEY:-}
+      - PORT=8080
     restart: unless-stopped
     networks:
       - odoo-network

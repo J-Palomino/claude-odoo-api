@@ -19,6 +19,14 @@ from urllib3.util.retry import Retry
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 import mcp.server.stdio
+from mcp.server.sse import SseServerTransport
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route, Mount
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
+import uvicorn
 
 # Configure logging with more detail
 logging.basicConfig(
@@ -211,28 +219,44 @@ odoo_clients: Dict[str, OdooClient] = {}
 
 
 def load_company_configs() -> Dict[str, Dict[str, str]]:
-    """Load company configurations from .env file"""
+    """Load company configurations from INI file or environment variables"""
     global company_configs
 
     if company_configs:
         return company_configs
 
-    if not os.path.exists(CONFIG_FILE):
-        raise ValueError(f"Configuration file not found: {CONFIG_FILE}")
+    # Try INI config file first
+    if os.path.exists(CONFIG_FILE):
+        config = ConfigParser()
+        config.read(CONFIG_FILE)
 
-    config = ConfigParser()
-    config.read(CONFIG_FILE)
+        for section in config.sections():
+            company_configs[section] = {
+                'url': config.get(section, 'ODOO_URL'),
+                'database': config.get(section, 'ODOO_DATABASE'),
+                'api_key': config.get(section, 'ODOO_API_KEY'),
+                'company_id': config.get(section, 'COMPANY_ID', fallback='1')
+            }
 
-    for section in config.sections():
-        company_configs[section] = {
-            'url': config.get(section, 'ODOO_URL'),
-            'database': config.get(section, 'ODOO_DATABASE'),
-            'api_key': config.get(section, 'ODOO_API_KEY'),
-            'company_id': config.get(section, 'COMPANY_ID', fallback='1')
-        }
-
+    # Fallback to environment variables (for containerized deployments)
     if not company_configs:
-        raise ValueError("No company configurations found in .env file")
+        odoo_url = os.getenv("ODOO_URL")
+        odoo_db = os.getenv("ODOO_DATABASE")
+        odoo_key = os.getenv("ODOO_API_KEY")
+
+        if odoo_url and odoo_db and odoo_key:
+            company_configs["mint"] = {
+                'url': odoo_url,
+                'database': odoo_db,
+                'api_key': odoo_key,
+                'company_id': os.getenv("COMPANY_ID", "1")
+            }
+            logger.info("Loaded company config from environment variables")
+        else:
+            raise ValueError(
+                "No configuration found. Provide an INI config file or set "
+                "ODOO_URL, ODOO_DATABASE, and ODOO_API_KEY environment variables."
+            )
 
     logger.info(f"Loaded {len(company_configs)} company configurations: {list(company_configs.keys())}")
     return company_configs
@@ -563,9 +587,73 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error: {str(e)}")]
 
 
-async def main():
-    """Run the MCP server"""
-    logger.info("Starting Odoo MCP Server (Multi-Company Support)")
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    """Validates Bearer token against MCP_API_KEY env var. Skips /health."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path == "/health":
+            return await call_next(request)
+
+        api_key = os.getenv("MCP_API_KEY")
+        if not api_key:
+            # No key configured — allow all (local dev)
+            return await call_next(request)
+
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header != f"Bearer {api_key}":
+            return JSONResponse(
+                {"error": "Unauthorized"}, status_code=401
+            )
+
+        return await call_next(request)
+
+
+async def health(request: Request) -> JSONResponse:
+    """Health check endpoint"""
+    try:
+        companies = list_available_companies()
+    except Exception:
+        companies = []
+
+    return JSONResponse({
+        "status": "ok",
+        "server": "odoo-mcp-server",
+        "companies": companies,
+    })
+
+
+def create_starlette_app(mcp_server: Server) -> Starlette:
+    """Create a Starlette app that serves the MCP server over SSE"""
+    sse = SseServerTransport("/messages/")
+
+    async def handle_sse(request: Request):
+        async with sse.connect_sse(
+            request.scope, request.receive, request._send
+        ) as (read_stream, write_stream):
+            await mcp_server.run(
+                read_stream,
+                write_stream,
+                mcp_server.create_initialization_options()
+            )
+
+    starlette_app = Starlette(
+        debug=False,
+        routes=[
+            Route("/health", health),
+            Route("/sse", endpoint=handle_sse),
+            Mount("/messages/", app=sse.handle_post_message),
+        ],
+        middleware=[
+            Middleware(BearerAuthMiddleware),
+        ],
+    )
+
+    return starlette_app
+
+
+async def main_stdio():
+    """Run the MCP server over stdio transport"""
+    logger.info("Starting Odoo MCP Server (stdio transport)")
     logger.info(f"Configuration file: {CONFIG_FILE}")
 
     try:
@@ -584,5 +672,20 @@ async def main():
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+
+    if transport == "sse":
+        port = int(os.getenv("PORT", "8080"))
+        logger.info(f"Starting Odoo MCP Server (SSE transport on port {port})")
+
+        try:
+            companies = list_available_companies()
+            logger.info(f"Loaded {len(companies)} companies: {', '.join(companies)}")
+        except Exception as e:
+            logger.warning(f"Could not load company configurations on startup: {e}")
+
+        starlette_app = create_starlette_app(app)
+        uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+    else:
+        import asyncio
+        asyncio.run(main_stdio())

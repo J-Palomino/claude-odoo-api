@@ -25,8 +25,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install runtime dependencies for Pillow
+# Install runtime dependencies for Pillow + curl for healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
     libjpeg62-turbo \
     zlib1g \
     libpng16-16 \
@@ -56,10 +57,13 @@ ENV ODOO_DATABASE=""
 ENV ODOO_API_KEY=""
 ENV ODOO_REQUEST_TIMEOUT=30
 ENV ODOO_MAX_RETRIES=3
+ENV MCP_TRANSPORT=sse
 
-# Health check
+EXPOSE 8080
+
+# Health check using the /health endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)"
+    CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 
 # Run the MCP server
 CMD ["python", "src/odoo_mcp_server.py"]

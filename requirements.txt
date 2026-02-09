@@ -9,6 +9,11 @@ Pillow>=10.0.0
 # Enhanced HTTP client with retry logic
 urllib3>=2.0.0
 
+# SSE/HTTP transport
+starlette>=0.37.0
+uvicorn>=0.29.0
+sse-starlette>=2.0.0
+
 # Configuration management
 python-dotenv>=1.0.0
 
