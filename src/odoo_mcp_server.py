@@ -11,6 +11,7 @@ import os
 import json
 import logging
 import time
+import contextvars
 from typing import Any, Optional, Dict
 from configparser import ConfigParser
 import requests
@@ -213,9 +214,14 @@ class OdooClient:
 # Initialize the MCP server
 app = Server("odoo-mcp-server")
 
-# Store multiple company configurations
+# Store multiple company configurations (defaults from env)
 company_configs: Dict[str, Dict[str, str]] = {}
 odoo_clients: Dict[str, OdooClient] = {}
+
+# Per-session user API key (set during SSE connection)
+_session_api_key: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "_session_api_key", default=None
+)
 
 
 def load_company_configs() -> Dict[str, Dict[str, str]]:
@@ -242,20 +248,21 @@ def load_company_configs() -> Dict[str, Dict[str, str]]:
     if not company_configs:
         odoo_url = os.getenv("ODOO_URL")
         odoo_db = os.getenv("ODOO_DATABASE")
-        odoo_key = os.getenv("ODOO_API_KEY")
+        # ODOO_API_KEY is optional — per-user keys are injected at runtime
+        odoo_key = os.getenv("ODOO_API_KEY", "")
 
-        if odoo_url and odoo_db and odoo_key:
+        if odoo_url and odoo_db:
             company_configs["mint"] = {
                 'url': odoo_url,
                 'database': odoo_db,
-                'api_key': odoo_key,
+                'api_key': odoo_key,  # May be empty; per-user key overrides in get_odoo_client
                 'company_id': os.getenv("COMPANY_ID", "1")
             }
             logger.info("Loaded company config from environment variables")
         else:
             raise ValueError(
                 "No configuration found. Provide an INI config file or set "
-                "ODOO_URL, ODOO_DATABASE, and ODOO_API_KEY environment variables."
+                "ODOO_URL and ODOO_DATABASE environment variables."
             )
 
     logger.info(f"Loaded {len(company_configs)} company configurations: {list(company_configs.keys())}")
@@ -263,10 +270,19 @@ def load_company_configs() -> Dict[str, Dict[str, str]]:
 
 
 def get_odoo_client(company: str) -> OdooClient:
-    """Get or create Odoo client instance for specific company"""
+    """Get or create Odoo client instance for specific company.
+
+    If a per-session API key is set (via SSE auth), creates a user-scoped
+    client using that key. This ensures each user only gets their Odoo
+    permissions. Clients are cached by (company, api_key) to avoid
+    re-creating sessions on every tool call.
+    """
     global odoo_clients
 
-    if company not in odoo_clients:
+    session_key = _session_api_key.get()
+    cache_key = f"{company}:{session_key}" if session_key else company
+
+    if cache_key not in odoo_clients:
         configs = load_company_configs()
 
         if company not in configs:
@@ -274,14 +290,18 @@ def get_odoo_client(company: str) -> OdooClient:
             raise ValueError(f"Company '{company}' not found. Available companies: {available}")
 
         config = configs[company]
-        odoo_clients[company] = OdooClient(
+
+        # Use the per-session API key if available, otherwise fall back to env config
+        api_key = session_key or config['api_key']
+
+        odoo_clients[cache_key] = OdooClient(
             config['url'],
             config['database'],
-            config['api_key']
+            api_key
         )
-        logger.info(f"Created Odoo client for company: {company}")
+        logger.info(f"Created Odoo client for company={company} (per-user={bool(session_key)})")
 
-    return odoo_clients[company]
+    return odoo_clients[cache_key]
 
 
 def list_available_companies() -> list[str]:
@@ -588,22 +608,74 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """Validates Bearer token against MCP_API_KEY env var. Skips /health."""
+    """Validates Bearer token as an Odoo API key. Each user connects with their
+    own key and gets only their Odoo permissions. Skips /health."""
+
+    # Cache verified API keys -> Odoo uid to avoid re-authenticating every request
+    _verified_keys: Dict[str, int] = {}
 
     async def dispatch(self, request: Request, call_next):
         if request.url.path == "/health":
             return await call_next(request)
 
-        api_key = os.getenv("MCP_API_KEY")
-        if not api_key:
-            # No key configured — allow all (local dev)
-            return await call_next(request)
-
         auth_header = request.headers.get("Authorization", "")
-        if auth_header != f"Bearer {api_key}":
+        if not auth_header.startswith("Bearer "):
             return JSONResponse(
                 {"error": "Unauthorized"}, status_code=401
             )
+
+        user_api_key = auth_header[7:]  # Strip "Bearer "
+        if not user_api_key:
+            return JSONResponse(
+                {"error": "Unauthorized"}, status_code=401
+            )
+
+        # Verify the API key against Odoo (with caching)
+        if user_api_key not in self._verified_keys:
+            odoo_url = os.getenv("ODOO_URL", "").rstrip("/")
+            odoo_db = os.getenv("ODOO_DATABASE", "odoo")
+
+            if not odoo_url:
+                logger.error("ODOO_URL not configured")
+                return JSONResponse(
+                    {"error": "Server misconfigured"}, status_code=500
+                )
+
+            try:
+                # Verify the API key by making a simple read call to Odoo.
+                # Odoo API keys work as Bearer tokens on the JSON-2 API.
+                # A successful call = valid key; 401/403 = invalid key.
+                resp = requests.post(
+                    f"{odoo_url}/json/2/res.users/search_read",
+                    json={"domain": [["id", "=", -1]], "fields": ["id"], "limit": 1},
+                    headers={
+                        "Authorization": f"Bearer {user_api_key}",
+                        "X-Odoo-Database": odoo_db,
+                        "Content-Type": "application/json",
+                    },
+                    timeout=10
+                )
+
+                if resp.status_code in (401, 403):
+                    logger.warning("Odoo API key auth failed (invalid key)")
+                    return JSONResponse(
+                        {"error": "Unauthorized"}, status_code=401
+                    )
+
+                resp.raise_for_status()
+                # Key is valid — store uid=0 as placeholder (actual perms enforced by Odoo)
+                self._verified_keys[user_api_key] = 0
+                logger.info("Verified Odoo API key successfully")
+
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Odoo auth check failed: {e}")
+                return JSONResponse(
+                    {"error": "Auth verification failed"}, status_code=502
+                )
+
+        # Store the user's API key in request state so tools use it
+        request.state.user_api_key = user_api_key
+        request.state.user_uid = self._verified_keys[user_api_key]
 
         return await call_next(request)
 
@@ -623,10 +695,25 @@ async def health(request: Request) -> JSONResponse:
 
 
 def create_starlette_app(mcp_server: Server) -> Starlette:
-    """Create a Starlette app that serves the MCP server over SSE"""
+    """Create a Starlette app that serves the MCP server over SSE.
+
+    Each SSE connection extracts the user's Odoo API key from the Bearer token
+    and injects a per-user OdooClient into the global company_configs so that
+    all tool calls within that session use the caller's permissions.
+    """
     sse = SseServerTransport("/messages/")
 
     async def handle_sse(request: Request):
+        # Extract the user's API key (already validated by BearerAuthMiddleware)
+        user_api_key = getattr(request.state, "user_api_key", None)
+        user_uid = getattr(request.state, "user_uid", None)
+
+        if user_api_key:
+            # Set per-session API key via contextvar — tool calls in this
+            # session will create an OdooClient scoped to this user's key
+            _session_api_key.set(user_api_key)
+            logger.info(f"SSE session started for uid={user_uid} with per-user API key")
+
         async with sse.connect_sse(
             request.scope, request.receive, request._send
         ) as (read_stream, write_stream):
