@@ -11,7 +11,9 @@ import os
 import json
 import logging
 import time
+import asyncio
 import contextvars
+from functools import partial
 from typing import Any, Optional, Dict
 from configparser import ConfigParser
 import requests
@@ -25,8 +27,6 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route, Mount
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 
 # Configure logging with more detail
@@ -150,7 +150,7 @@ class OdooClient:
         offset: Optional[int] = None,
         order: Optional[str] = None
     ) -> list:
-        """Search and read records"""
+        """Search and read records (sync)"""
         payload = {"domain": domain}
         if fields:
             payload["fields"] = fields
@@ -164,17 +164,17 @@ class OdooClient:
         return self._make_request(model, "search_read", payload)
 
     def create(self, model: str, values: dict) -> int:
-        """Create a new record"""
+        """Create a new record (sync)"""
         payload = {"values": values}
         return self._make_request(model, "create", payload)
 
     def write(self, model: str, ids: list, values: dict) -> bool:
-        """Update existing records"""
+        """Update existing records (sync)"""
         payload = {"ids": ids, "values": values}
         return self._make_request(model, "write", payload)
 
     def unlink(self, model: str, ids: list) -> bool:
-        """Delete records"""
+        """Delete records (sync)"""
         payload = {"ids": ids}
         return self._make_request(model, "unlink", payload)
 
@@ -186,7 +186,7 @@ class OdooClient:
         offset: Optional[int] = None,
         order: Optional[str] = None
     ) -> list:
-        """Search for record IDs"""
+        """Search for record IDs (sync)"""
         payload = {"domain": domain}
         if limit:
             payload["limit"] = limit
@@ -198,7 +198,7 @@ class OdooClient:
         return self._make_request(model, "search", payload)
 
     def read(self, model: str, ids: list, fields: Optional[list] = None) -> list:
-        """Read specific records by ID"""
+        """Read specific records by ID (sync)"""
         payload = {"ids": ids}
         if fields:
             payload["fields"] = fields
@@ -206,9 +206,32 @@ class OdooClient:
         return self._make_request(model, "read", payload)
 
     def search_count(self, model: str, domain: list) -> int:
-        """Count records matching domain"""
+        """Count records matching domain (sync)"""
         payload = {"domain": domain}
         return self._make_request(model, "search_count", payload)
+
+    # ── Async wrappers (run sync requests in thread pool) ────────
+
+    async def async_search_read(self, model, domain, **kwargs):
+        return await asyncio.to_thread(self.search_read, model, domain, **kwargs)
+
+    async def async_create(self, model, values):
+        return await asyncio.to_thread(self.create, model, values)
+
+    async def async_write(self, model, ids, values):
+        return await asyncio.to_thread(self.write, model, ids, values)
+
+    async def async_unlink(self, model, ids):
+        return await asyncio.to_thread(self.unlink, model, ids)
+
+    async def async_search(self, model, domain, **kwargs):
+        return await asyncio.to_thread(self.search, model, domain, **kwargs)
+
+    async def async_read(self, model, ids, **kwargs):
+        return await asyncio.to_thread(self.read, model, ids, **kwargs)
+
+    async def async_search_count(self, model, domain):
+        return await asyncio.to_thread(self.search_count, model, domain)
 
 
 # Initialize the MCP server
@@ -728,9 +751,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         client = get_odoo_client(company)
 
         if name == "odoo_search_read":
-            result = client.search_read(
-                model=arguments["model"],
-                domain=arguments.get("domain", []),
+            result = await client.async_search_read(
+                arguments["model"],
+                arguments.get("domain", []),
                 fields=arguments.get("fields"),
                 limit=arguments.get("limit"),
                 offset=arguments.get("offset"),
@@ -739,31 +762,31 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "odoo_create":
-            result = client.create(
-                model=arguments["model"],
-                values=arguments["values"]
+            result = await client.async_create(
+                arguments["model"],
+                arguments["values"]
             )
             return [TextContent(type="text", text=f"Created record with ID: {result}")]
 
         elif name == "odoo_write":
-            result = client.write(
-                model=arguments["model"],
-                ids=arguments["ids"],
-                values=arguments["values"]
+            result = await client.async_write(
+                arguments["model"],
+                arguments["ids"],
+                arguments["values"]
             )
             return [TextContent(type="text", text=f"Updated successfully: {result}")]
 
         elif name == "odoo_unlink":
-            result = client.unlink(
-                model=arguments["model"],
-                ids=arguments["ids"]
+            result = await client.async_unlink(
+                arguments["model"],
+                arguments["ids"]
             )
             return [TextContent(type="text", text=f"Deleted successfully: {result}")]
 
         elif name == "odoo_search":
-            result = client.search(
-                model=arguments["model"],
-                domain=arguments.get("domain", []),
+            result = await client.async_search(
+                arguments["model"],
+                arguments.get("domain", []),
                 limit=arguments.get("limit"),
                 offset=arguments.get("offset"),
                 order=arguments.get("order")
@@ -771,17 +794,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "odoo_read":
-            result = client.read(
-                model=arguments["model"],
-                ids=arguments["ids"],
+            result = await client.async_read(
+                arguments["model"],
+                arguments["ids"],
                 fields=arguments.get("fields")
             )
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "odoo_search_count":
-            result = client.search_count(
-                model=arguments["model"],
-                domain=arguments.get("domain", [])
+            result = await client.async_search_count(
+                arguments["model"],
+                arguments.get("domain", [])
             )
             return [TextContent(type="text", text=f"Count: {result}")]
 
@@ -798,9 +821,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             if arguments.get("name_pattern"):
                 domain.append(["name", "ilike", arguments["name_pattern"]])
 
-            result = client.search_read(
-                model="website.page",
-                domain=domain,
+            result = await client.async_search_read(
+                "website.page",
+                domain,
                 fields=["id", "name", "url", "is_published", "website_id",
                         "website_meta_title", "website_meta_description", "date_publish"],
                 limit=arguments.get("limit", 50),
@@ -821,13 +844,15 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                            "website_meta_keywords", "website_meta_og_img", "date_publish"]
 
             if url:
-                pages = client.search_read("website.page", [["url", "=", url]],
-                                           fields=page_fields, limit=1)
+                pages = await client.async_search_read(
+                    "website.page", [["url", "=", url]],
+                    fields=page_fields, limit=1)
                 if not pages:
                     raise ValueError(f"No page found with URL: {url}")
                 page = pages[0]
             else:
-                pages = client.read("website.page", [page_id], fields=page_fields)
+                pages = await client.async_read(
+                    "website.page", [page_id], fields=page_fields)
                 if not pages:
                     raise ValueError(f"No page found with ID: {page_id}")
                 page = pages[0]
@@ -835,7 +860,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             # Fetch linked view content
             vid = _resolve_view_id(page.get("view_id"))
             if vid:
-                views = client.read("ir.ui.view", [vid], fields=["id", "name", "arch_db", "key"])
+                views = await client.async_read(
+                    "ir.ui.view", [vid], fields=["id", "name", "arch_db", "key"])
                 if views:
                     page["view_content"] = views[0].get("arch_db", "")
                     page["view_key"] = views[0].get("key", "")
@@ -865,7 +891,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             )
 
             # Create the backing view first
-            view_id = client.create("ir.ui.view", {
+            view_id = await client.async_create("ir.ui.view", {
                 "name": page_name,
                 "type": "qweb",
                 "arch_db": arch,
@@ -885,7 +911,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             if arguments.get("meta_description"):
                 page_values["website_meta_description"] = arguments["meta_description"]
 
-            new_page_id = client.create("website.page", page_values)
+            new_page_id = await client.async_create("website.page", page_values)
 
             return [TextContent(type="text", text=json.dumps({
                 "page_id": new_page_id,
@@ -910,17 +936,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     page_values[odoo_field] = arguments[arg_key]
 
             if page_values:
-                client.write("website.page", [pid], page_values)
+                await client.async_write("website.page", [pid], page_values)
 
             # Update view content if provided
             if "content" in arguments and arguments["content"] is not None:
-                pages = client.read("website.page", [pid], fields=["view_id"])
+                pages = await client.async_read("website.page", [pid], fields=["view_id"])
                 if not pages:
                     raise ValueError(f"Page {pid} not found")
                 vid = _resolve_view_id(pages[0].get("view_id"))
                 if not vid:
                     raise ValueError(f"Page {pid} has no linked view")
-                client.write("ir.ui.view", [vid], {"arch_db": arguments["content"]})
+                await client.async_write("ir.ui.view", [vid], {"arch_db": arguments["content"]})
 
             updated = list(page_values.keys())
             if "content" in arguments and arguments["content"] is not None:
@@ -930,7 +956,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         elif name == "website_toggle_published":
             pid = arguments["page_id"]
             published = arguments["published"]
-            client.write("website.page", [pid], {"is_published": published})
+            await client.async_write("website.page", [pid], {"is_published": published})
             state = "published" if published else "unpublished"
             return [TextContent(type="text", text=f"Page {pid} is now {state}")]
 
@@ -938,9 +964,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             website_id = arguments.get("website_id", 1)
             flat = arguments.get("flat", False)
 
-            menus = client.search_read(
-                model="website.menu",
-                domain=[["website_id", "=", website_id]],
+            menus = await client.async_search_read(
+                "website.menu",
+                [["website_id", "=", website_id]],
                 fields=["id", "name", "url", "sequence", "parent_id",
                         "child_id", "new_window", "is_visible", "page_id"],
                 order="sequence asc"
@@ -958,7 +984,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             # Resolve parent by name if needed
             if not parent_id and arguments.get("parent_name"):
-                parents = client.search("website.menu", [
+                parents = await client.async_search("website.menu", [
                     ["website_id", "=", website_id],
                     ["name", "ilike", arguments["parent_name"]]
                 ], limit=1)
@@ -967,7 +993,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             # Fall back to root menu
             if not parent_id:
-                roots = client.search("website.menu", [
+                roots = await client.async_search("website.menu", [
                     ["website_id", "=", website_id],
                     ["parent_id", "=", False]
                 ], limit=1)
@@ -984,7 +1010,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             if parent_id:
                 values["parent_id"] = parent_id
 
-            menu_id = client.create("website.menu", values)
+            menu_id = await client.async_create("website.menu", values)
             return [TextContent(type="text", text=json.dumps({
                 "menu_id": menu_id,
                 "parent_id": parent_id,
@@ -1001,12 +1027,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             if not values:
                 return [TextContent(type="text", text=f"No changes specified for menu {mid}")]
 
-            client.write("website.menu", [mid], values)
+            await client.async_write("website.menu", [mid], values)
             return [TextContent(type="text", text=f"Updated menu {mid}: {', '.join(values.keys())}")]
 
         elif name == "website_delete_menu":
             mid = arguments["menu_id"]
-            client.unlink("website.menu", [mid])
+            await client.async_unlink("website.menu", [mid])
             return [TextContent(type="text", text=f"Deleted menu {mid}")]
 
         elif name == "website_manage_redirect":
@@ -1016,9 +1042,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             try:
                 if action == "list":
-                    result = client.search_read(
-                        model=redirect_model,
-                        domain=[["website_id", "=", website_id]],
+                    result = await client.async_search_read(
+                        redirect_model,
+                        [["website_id", "=", website_id]],
                         fields=["id", "name", "url_from", "url_to", "redirect_type", "active"],
                         limit=arguments.get("limit", 50),
                         order="id desc"
@@ -1030,7 +1056,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     url_to = arguments.get("url_to")
                     if not url_from or not url_to:
                         raise ValueError("url_from and url_to are required for 'create'")
-                    rid = client.create(redirect_model, {
+                    rid = await client.async_create(redirect_model, {
                         "url_from": url_from,
                         "url_to": url_to,
                         "redirect_type": arguments.get("redirect_type", "301"),
@@ -1042,7 +1068,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     rid = arguments.get("redirect_id")
                     if not rid:
                         raise ValueError("redirect_id is required for 'delete'")
-                    client.unlink(redirect_model, [rid])
+                    await client.async_unlink(redirect_model, [rid])
                     return [TextContent(type="text", text=f"Deleted redirect {rid}")]
 
             except ValueError as e:
@@ -1062,77 +1088,96 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error: {str(e)}")]
 
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """Validates Bearer token as an Odoo API key. Each user connects with their
-    own key and gets only their Odoo permissions. Skips /health."""
+# ── Auth helpers ─────────────────────────────────────────────────
+# Cache verified API keys in-memory (survives across requests within a deploy)
+_verified_keys: Dict[str, int] = {}
 
-    # Cache verified API keys -> Odoo uid to avoid re-authenticating every request
-    _verified_keys: Dict[str, int] = {}
 
-    async def dispatch(self, request: Request, call_next):
-        if request.url.path == "/health":
-            return await call_next(request)
+async def _verify_api_key(api_key: str) -> bool:
+    """Verify an Odoo API key by calling Odoo in a thread (non-blocking)."""
+    if api_key in _verified_keys:
+        return True
 
-        auth_header = request.headers.get("Authorization", "")
+    odoo_url = os.getenv("ODOO_URL", "").rstrip("/")
+    odoo_db = os.getenv("ODOO_DATABASE", "odoo")
+
+    if not odoo_url:
+        logger.error("ODOO_URL not configured")
+        return False
+
+    def _check():
+        resp = requests.post(
+            f"{odoo_url}/json/2/res.users/search_read",
+            json={"domain": [["id", "=", -1]], "fields": ["id"], "limit": 1},
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "X-Odoo-Database": odoo_db,
+                "Content-Type": "application/json",
+            },
+            timeout=10
+        )
+        return resp.status_code
+
+    try:
+        status = await asyncio.to_thread(_check)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Odoo auth check failed: {e}")
+        return False
+
+    if status in (401, 403):
+        logger.warning("Odoo API key auth failed (invalid key)")
+        return False
+
+    _verified_keys[api_key] = 0
+    logger.info("Verified Odoo API key successfully")
+    return True
+
+
+class BearerAuthMiddleware:
+    """Pure ASGI middleware for Bearer auth. Does NOT use BaseHTTPMiddleware,
+    which buffers responses and breaks SSE streaming."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path == "/health":
+            await self.app(scope, receive, send)
+            return
+
+        # Extract Bearer token from headers
+        headers = dict(scope.get("headers", []))
+        auth_header = headers.get(b"authorization", b"").decode()
+
         if not auth_header.startswith("Bearer "):
-            return JSONResponse(
-                {"error": "Unauthorized"}, status_code=401
-            )
+            response = JSONResponse({"error": "Unauthorized"}, status_code=401)
+            await response(scope, receive, send)
+            return
 
-        user_api_key = auth_header[7:]  # Strip "Bearer "
+        user_api_key = auth_header[7:]
         if not user_api_key:
-            return JSONResponse(
-                {"error": "Unauthorized"}, status_code=401
-            )
+            response = JSONResponse({"error": "Unauthorized"}, status_code=401)
+            await response(scope, receive, send)
+            return
 
-        # Verify the API key against Odoo (with caching)
-        if user_api_key not in self._verified_keys:
-            odoo_url = os.getenv("ODOO_URL", "").rstrip("/")
-            odoo_db = os.getenv("ODOO_DATABASE", "odoo")
+        valid = await _verify_api_key(user_api_key)
+        if not valid:
+            response = JSONResponse({"error": "Unauthorized"}, status_code=401)
+            await response(scope, receive, send)
+            return
 
-            if not odoo_url:
-                logger.error("ODOO_URL not configured")
-                return JSONResponse(
-                    {"error": "Server misconfigured"}, status_code=500
-                )
+        # Inject auth into scope state so downstream handlers can read it
+        if "state" not in scope:
+            scope["state"] = {}
+        scope["state"]["user_api_key"] = user_api_key
+        scope["state"]["user_uid"] = _verified_keys.get(user_api_key, 0)
 
-            try:
-                # Verify the API key by making a simple read call to Odoo.
-                # Odoo API keys work as Bearer tokens on the JSON-2 API.
-                # A successful call = valid key; 401/403 = invalid key.
-                resp = requests.post(
-                    f"{odoo_url}/json/2/res.users/search_read",
-                    json={"domain": [["id", "=", -1]], "fields": ["id"], "limit": 1},
-                    headers={
-                        "Authorization": f"Bearer {user_api_key}",
-                        "X-Odoo-Database": odoo_db,
-                        "Content-Type": "application/json",
-                    },
-                    timeout=10
-                )
-
-                if resp.status_code in (401, 403):
-                    logger.warning("Odoo API key auth failed (invalid key)")
-                    return JSONResponse(
-                        {"error": "Unauthorized"}, status_code=401
-                    )
-
-                resp.raise_for_status()
-                # Key is valid — store uid=0 as placeholder (actual perms enforced by Odoo)
-                self._verified_keys[user_api_key] = 0
-                logger.info("Verified Odoo API key successfully")
-
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Odoo auth check failed: {e}")
-                return JSONResponse(
-                    {"error": "Auth verification failed"}, status_code=502
-                )
-
-        # Store the user's API key in request state so tools use it
-        request.state.user_api_key = user_api_key
-        request.state.user_uid = self._verified_keys[user_api_key]
-
-        return await call_next(request)
+        await self.app(scope, receive, send)
 
 
 async def health(request: Request) -> JSONResponse:
@@ -1159,9 +1204,10 @@ def create_starlette_app(mcp_server: Server) -> Starlette:
     sse = SseServerTransport("/messages/")
 
     async def handle_sse(request: Request):
-        # Extract the user's API key (already validated by BearerAuthMiddleware)
-        user_api_key = getattr(request.state, "user_api_key", None)
-        user_uid = getattr(request.state, "user_uid", None)
+        # Read auth from scope state (injected by BearerAuthMiddleware)
+        state = request.scope.get("state", {})
+        user_api_key = state.get("user_api_key")
+        user_uid = state.get("user_uid")
 
         if user_api_key:
             # Set per-session API key via contextvar — tool calls in this
@@ -1178,19 +1224,17 @@ def create_starlette_app(mcp_server: Server) -> Starlette:
                 mcp_server.create_initialization_options()
             )
 
-    starlette_app = Starlette(
+    inner_app = Starlette(
         debug=False,
         routes=[
             Route("/health", health),
             Route("/sse", endpoint=handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
         ],
-        middleware=[
-            Middleware(BearerAuthMiddleware),
-        ],
     )
 
-    return starlette_app
+    # Wrap with pure ASGI auth middleware (NOT BaseHTTPMiddleware which breaks SSE)
+    return BearerAuthMiddleware(inner_app)
 
 
 async def main_stdio():

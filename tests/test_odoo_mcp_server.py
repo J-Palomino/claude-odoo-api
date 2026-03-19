@@ -444,7 +444,8 @@ class TestWebsiteToolHandlers:
                 "url_pattern": "/about"
             })
             call_args = mock_sr.call_args
-            domain = call_args.kwargs.get("domain", call_args[1].get("domain", []))
+            # async_search_read passes (model, domain) as positional args
+            domain = call_args[0][1] if len(call_args[0]) > 1 else call_args.kwargs.get("domain", [])
             assert ["is_published", "=", True] in domain
             assert ["url", "ilike", "/about"] in domain
 
